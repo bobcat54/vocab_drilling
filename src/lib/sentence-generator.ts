@@ -30,7 +30,7 @@ export function generateFallbackSentences(word: CSVRow): string[] {
  * Generate sentences for a single word via the API route
  */
 async function generateSentencesForWord(word: CSVRow): Promise<string[]> {
-  const MAX_RETRIES = 2;
+  const MAX_RETRIES = 3;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -45,8 +45,8 @@ async function generateSentencesForWord(word: CSVRow): Promise<string[]> {
 
       if (response.status === 429) {
         if (attempt < MAX_RETRIES) {
-          console.warn(`Rate limited for "${word.portuguese}", retrying in 3s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          console.warn(`Rate limited for "${word.portuguese}", retrying in 10s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+          await new Promise(resolve => setTimeout(resolve, 10000));
           continue;
         }
         throw new Error('Rate limited after retries');
@@ -82,7 +82,7 @@ export async function generateAllSentences(
   onProgress?: (current: number, total: number) => void
 ): Promise<Record<string, string[]>> {
   const results: Record<string, string[]> = {};
-  const CONCURRENCY = 2;
+  const CONCURRENCY = 1;
 
   for (let i = 0; i < words.length; i += CONCURRENCY) {
     const batch = words.slice(i, Math.min(i + CONCURRENCY, words.length));
@@ -98,7 +98,7 @@ export async function generateAllSentences(
     onProgress?.(Math.min(i + CONCURRENCY, words.length), words.length);
 
     if (i + CONCURRENCY < words.length) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 3000));
     }
   }
 
