@@ -12,6 +12,8 @@ interface SessionCompletionScreenProps {
   incorrectAnswers: number;
   nearMatches: number;
   dailyStreak: number;
+  wordsMastered: number;
+  onNavigateAway: () => void;
 }
 
 export function SessionCompletionScreen({
@@ -21,8 +23,15 @@ export function SessionCompletionScreen({
   incorrectAnswers,
   nearMatches,
   dailyStreak,
+  wordsMastered,
+  onNavigateAway,
 }: SessionCompletionScreenProps) {
   const router = useRouter();
+
+  const handleNavigate = (path: string) => {
+    onNavigateAway();
+    router.push(path);
+  };
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-br from-gray-900 via-slate-800 to-gray-900 px-4">
@@ -80,6 +89,14 @@ export function SessionCompletionScreen({
             </div>
           </div>
 
+          {/* Words Mastered */}
+          <div className="rounded-lg bg-gray-900/50 p-4">
+            <div className="flex items-center justify-between">
+              <span className="text-gray-400">Words Mastered</span>
+              <span className="text-xl font-semibold text-cyan-400">{wordsMastered}</span>
+            </div>
+          </div>
+
           {/* Breakdown */}
           <div className="grid grid-cols-3 gap-3">
             <div className="rounded-lg bg-green-900/20 p-3 text-center border border-green-700/30">
@@ -117,14 +134,14 @@ export function SessionCompletionScreen({
         {/* Actions */}
         <div className="space-y-3">
           <button
-            onClick={() => router.push('/')}
+            onClick={() => handleNavigate('/')}
             className="w-full rounded-lg bg-cyan-600 px-6 py-3 font-medium text-white hover:bg-cyan-500 transition-colors"
           >
             Back to Dashboard
           </button>
 
           <button
-            onClick={() => router.push('/progress')}
+            onClick={() => handleNavigate('/progress')}
             className="w-full rounded-lg border border-gray-700 bg-gray-800/50 px-6 py-3 font-medium text-gray-300 hover:bg-gray-700/50 transition-colors"
           >
             View Progress

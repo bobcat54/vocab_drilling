@@ -6,6 +6,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { useVocabStore } from '@/store/useVocabStore';
 import { isNearMatch } from '@/lib/utils';
+import { insertErrorLog } from '@/lib/supabase-data';
+import type { Word, QueueEntry } from '@/types';
 
 /**
  * Replace the target word in a sentence with '_____', handling accented characters.
@@ -53,60 +55,83 @@ export function DrillCard() {
   const [isCorrect, setIsCorrect] = useState(false);
   const [nearMatch, setNearMatch] = useState(false);
   const [currentSentence, setCurrentSentence] = useState('');
+  const [currentEnglishSentence, setCurrentEnglishSentence] = useState('');
+  const [currentSentenceId, setCurrentSentenceId] = useState<string | null>(null);
+  const [feedbackWord, setFeedbackWord] = useState<Word | null>(null);
+  const [feedbackSentence, setFeedbackSentence] = useState('');
+  const [feedbackEnglishSentence, setFeedbackEnglishSentence] = useState('');
+  const [feedbackSentenceId, setFeedbackSentenceId] = useState<string | null>(null);
+  const [feedbackStreak, setFeedbackStreak] = useState(0);
+  const [showGhost, setShowGhost] = useState(false);
+  const [ghostKey, setGhostKey] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ghostTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const answerStartRef = useRef<number>(Date.now());
 
   const {
     currentSession,
-    sessionWords,
-    currentWordIndex,
+    sessionQueue,
+    sessionMasteredIds,
+    sessionTotalWords,
     submitAnswer,
-    advanceWord,
     completeSession,
     getCurrentWord,
+    getCurrentQueueEntry,
     muteWord,
-    appState,
   } = useVocabStore();
 
   const currentWord = getCurrentWord();
+  const currentQueueEntry = getCurrentQueueEntry();
 
   // Re-read the word from the store for live stats (submitAnswer updates the words array)
   const liveWord = useVocabStore(state =>
     currentWord ? state.words.find(w => w.id === currentWord.id) : null
   );
 
-  // Calculate session stats
-  const correctCount = currentSession?.wordResults.filter(r => r.isCorrect).length || 0;
-  const wrongCount = currentSession?.wordResults.filter(r => !r.isCorrect).length || 0;
-  const totalAnswered = correctCount + wrongCount;
-  const currentAccuracy = totalAnswered > 0 ? Math.round((correctCount / totalAnswered) * 100) : 0;
+  // Use feedbackWord/feedbackSentence during correct-answer feedback, otherwise current
+  const displayWord = showFeedback ? feedbackWord : currentWord;
+  const displaySentence = showFeedback ? feedbackSentence : currentSentence;
+  const displayEnglishSentence = showFeedback ? feedbackEnglishSentence : currentEnglishSentence;
+
+  const masteredCount = sessionMasteredIds.length;
 
   // Pick a random sentence when the word changes
   useEffect(() => {
     if (!currentWord?.exampleSentences?.length) {
       setCurrentSentence('');
+      setCurrentEnglishSentence('');
+      setCurrentSentenceId(null);
       return;
     }
     const idx = Math.floor(Math.random() * currentWord.exampleSentences.length);
-    setCurrentSentence(currentWord.exampleSentences[idx]);
+    const pair = currentWord.exampleSentences[idx];
+    setCurrentSentence(pair.pt);
+    setCurrentEnglishSentence(pair.en);
+    setCurrentSentenceId(pair.id);
+    // Reset answer timer when word changes
+    answerStartRef.current = Date.now();
   }, [currentWord?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Reset state when word changes (after advancement)
+  // Reset state when advancing to a new word
   useEffect(() => {
-    setAnswer('');
-    setShowFeedback(false);
-    setNearMatch(false);
+    if (!showFeedback) {
+      setAnswer('');
+      setNearMatch(false);
+      setShowGhost(false);
 
-    // Auto-focus input
-    setTimeout(() => {
-      inputRef.current?.focus();
-    }, 100);
-  }, [currentWordIndex]);
+      // Auto-focus input
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 100);
+    }
+  }, [currentQueueEntry?.wordId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Clean up timer on unmount
+  // Clean up timers on unmount
   useEffect(() => {
     return () => {
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      if (ghostTimerRef.current) clearTimeout(ghostTimerRef.current);
     };
   }, []);
 
@@ -115,44 +140,87 @@ export function DrillCard() {
     (e?: React.FormEvent) => {
       e?.preventDefault();
 
-      if (!currentWord || !answer.trim() || showFeedback) return;
+      if (!currentWord || !currentQueueEntry || !answer.trim() || showFeedback) return;
 
       const correct = answer.trim().toLowerCase() === currentWord.portuguese.toLowerCase();
       const near = isNearMatch(answer.trim(), currentWord.portuguese);
+      const timeToAnswerMs = Date.now() - answerStartRef.current;
 
-      // Record the attempt in the store (does NOT advance)
+      // Clear any existing timers
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      if (ghostTimerRef.current) clearTimeout(ghostTimerRef.current);
+
+      // Record the attempt in the store
       submitAnswer(currentWord.id, answer.trim());
 
-      // Show feedback
       setIsCorrect(correct);
       setNearMatch(near);
-      setShowFeedback(true);
 
-      // Clear any existing timer
-      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+      // Log to error_log in Supabase (fire-and-forget)
+      const fuzzyScore = correct ? (near ? 0.9 : 1.0) : 0.0;
+      let errorCategory: string | null = null;
+      if (!correct && near) errorCategory = 'accent';
+      else if (!correct) errorCategory = 'wrong';
+
+      insertErrorLog({
+        drill_type: 'word',
+        sentence_id: currentSentenceId,
+        word_id: currentWord.id,
+        expected_answer: currentWord.portuguese,
+        user_input: answer.trim(),
+        is_correct: correct,
+        time_to_answer_ms: timeToAnswerMs,
+        fuzzy_score: fuzzyScore,
+        error_category: errorCategory,
+      }).catch(console.error);
 
       if (correct) {
-        // Correct: show green for 1.5s, then advance
+        // Correct: lock current word/sentence for feedback display, block input
+        setFeedbackWord(currentWord);
+        setFeedbackSentence(currentSentence);
+        setFeedbackEnglishSentence(currentEnglishSentence);
+        setFeedbackSentenceId(currentSentenceId);
+        setFeedbackStreak(currentQueueEntry.sessionCorrectStreak + 1);
+        setShowFeedback(true);
+        setShowGhost(false);
+
         feedbackTimerRef.current = setTimeout(() => {
-          if (currentWordIndex + 1 >= sessionWords.length) {
-            // Last word - complete session
+          setShowFeedback(false);
+          setFeedbackWord(null);
+          setFeedbackSentence('');
+          setFeedbackEnglishSentence('');
+          setFeedbackSentenceId(null);
+          setAnswer('');
+          setNearMatch(false);
+          // Reset timer for next word
+          answerStartRef.current = Date.now();
+
+          // Check if queue is now empty (session complete)
+          const queue = useVocabStore.getState().sessionQueue;
+          if (queue.length === 0) {
             setTimeout(() => completeSession(), 300);
           } else {
-            advanceWord();
+            setTimeout(() => inputRef.current?.focus(), 50);
           }
         }, 1500);
       } else {
-        // Wrong: show ghost for 3s, then reset for retry
-        feedbackTimerRef.current = setTimeout(() => {
-          setShowFeedback(false);
-          setAnswer('');
-          setTimeout(() => {
-            inputRef.current?.focus();
-          }, 50);
+        // Wrong: show ghost in gap (non-blocking), clear input, stay on same word
+        setShowGhost(true);
+        setGhostKey(prev => prev + 1);
+        setFeedbackStreak(0);
+        setAnswer('');
+        // Reset timer for retry
+        answerStartRef.current = Date.now();
+
+        ghostTimerRef.current = setTimeout(() => {
+          setShowGhost(false);
         }, 3000);
+
+        // Focus input immediately so user can retry
+        setTimeout(() => inputRef.current?.focus(), 50);
       }
     },
-    [currentWord, answer, showFeedback, submitAnswer, currentWordIndex, sessionWords.length, completeSession, advanceWord]
+    [currentWord, currentQueueEntry, answer, showFeedback, currentSentence, currentEnglishSentence, currentSentenceId, submitAnswer, completeSession]
   );
 
   // Handle "Learn Word" (show answer and move on)
@@ -169,15 +237,14 @@ export function DrillCard() {
 
     muteWord(currentWord.id);
 
-    // Advance to next word immediately
-    if (currentWordIndex + 1 >= sessionWords.length) {
+    // Check if queue is now empty after muting
+    const queue = useVocabStore.getState().sessionQueue;
+    if (queue.length === 0) {
       completeSession();
-    } else {
-      advanceWord();
     }
-  }, [currentWord, muteWord, currentWordIndex, sessionWords.length, completeSession, advanceWord]);
+  }, [currentWord, muteWord, completeSession]);
 
-  if (!currentSession || !currentWord) {
+  if (!currentSession || !displayWord) {
     return (
       <div className="flex h-screen items-center justify-center bg-gray-900 text-white">
         <p>No active session</p>
@@ -186,39 +253,35 @@ export function DrillCard() {
   }
 
   // Build sentence parts for inline rendering
-  const sentenceParts = currentSentence
-    ? splitSentenceIntoParts(currentSentence, currentWord.portuguese)
+  const sentenceParts = displaySentence
+    ? splitSentenceIntoParts(displaySentence, displayWord.portuguese)
     : [{ type: 'gap' as const }];
 
-  // Letter count hints (dashes) for Portuguese word
-  const letterHints = currentWord.portuguese.split('').map((char, idx) => (
-    <span key={idx} className="inline-block w-2 h-0.5 bg-cyan-500/40 mx-0.5" />
-  ));
+  // Progress based on mastered count
+  const progressPercent = sessionTotalWords > 0 ? (masteredCount / sessionTotalWords) * 100 : 0;
 
-  const sessionGoal = appState.sessionGoal;
-  const progress = `${currentWordIndex + 1}/${sessionGoal}`;
-  const progressPercent = ((currentWordIndex + 1) / sessionGoal) * 100;
+  // Streak dots for the current queue entry (4 dots, filled up to streak)
+  const displayStreak = showFeedback ? feedbackStreak : (currentQueueEntry?.sessionCorrectStreak ?? 0);
+  const streakDots = Array.from({ length: 4 }, (_, i) => i < displayStreak);
 
   // Get word status badge
-  const statusBadge = currentWord?.status === 'new'
+  const statusBadge = displayWord.status === 'new'
     ? 'New'
-    : currentWord?.status === 'learned'
+    : displayWord.status === 'learned'
     ? 'Learned'
     : 'Learning';
 
-  const statusColor = currentWord?.status === 'new'
+  const statusColor = displayWord.status === 'new'
     ? 'bg-blue-900/30 text-blue-300'
-    : currentWord?.status === 'learned'
+    : displayWord.status === 'learned'
     ? 'bg-green-900/30 text-green-300'
     : 'bg-amber-900/30 text-amber-300';
 
   // Per-word stats (use live data from store for real-time updates)
-  const wordTimesSeen = liveWord?.timesSeen ?? currentWord.timesSeen;
-  const wordTimesCorrect = liveWord?.timesCorrect ?? currentWord.timesCorrect;
-  const wordTimesWrong = wordTimesSeen - wordTimesCorrect;
-  const wordStats = wordTimesSeen === 0
+  const statsWord = liveWord ?? displayWord;
+  const wordStats = statsWord.totalAttempts === 0
     ? 'New word'
-    : `Attempts: ${wordTimesSeen} \u00b7 Correct: ${wordTimesCorrect} \u00b7 Wrong: ${wordTimesWrong}`;
+    : `All-time: ${statsWord.totalAttempts} attempts \u00b7 ${statsWord.totalCorrect} correct \u00b7 ${statsWord.totalWrong} wrong`;
 
   return (
     <div className="relative flex min-h-screen flex-col bg-gradient-to-br from-gray-900 via-slate-800 to-gray-900">
@@ -232,79 +295,78 @@ export function DrillCard() {
         />
       </div>
 
-      {/* Session Scoreboard - Below progress bar on mobile, side on desktop */}
+      {/* Session Info - Below progress bar */}
       <div className="absolute left-4 top-4 md:left-6 md:top-6 flex flex-col md:flex-row items-start md:items-center gap-2 md:gap-4">
         {/* Word Status Badge */}
         <span className={`rounded-full px-3 py-1 text-xs font-medium ${statusColor}`}>
           {statusBadge}
         </span>
 
-        {/* Scoreboard */}
-        <div className="flex items-center gap-3 text-xs font-medium">
-          <span className="text-green-400">
-            ✓ {correctCount}
-          </span>
-          <span className="text-red-400">
-            ✗ {wrongCount}
-          </span>
-          <span className="text-gray-400">
-            {currentAccuracy}%
-          </span>
+        {/* Level indicator */}
+        <span className="text-xs text-gray-400">
+          Level {displayWord.level}/8
+        </span>
+
+        {/* Streak dots */}
+        <div className="flex items-center gap-1">
+          {streakDots.map((filled, i) => (
+            <span
+              key={i}
+              className={`inline-block w-2 h-2 rounded-full ${
+                filled ? 'bg-green-400' : 'bg-gray-600'
+              }`}
+            />
+          ))}
         </div>
       </div>
 
       {/* Progress Counter */}
       <div className="absolute right-4 top-4 md:right-6 md:top-6 text-sm font-medium text-gray-400">
-        {progress}
+        {masteredCount} mastered / {sessionTotalWords} total
       </div>
 
       {/* Main Content Area - Centered with max-width */}
       <div className="flex flex-1 items-center justify-center px-4 pb-32 pt-16">
         <div className="w-full max-w-[550px] space-y-8">
-          {/* Letter Hints */}
-          <div className="flex items-center justify-center">
-            {letterHints}
-          </div>
-
           {/* Portuguese Sentence with Gap and Inline Feedback */}
           <div className="text-center">
             <p className="text-2xl md:text-3xl lg:text-4xl font-light leading-relaxed text-cyan-400">
               {sentenceParts.map((part, idx) => {
                 if (typeof part === 'object' && part.type === 'gap') {
                   // This is the gap - show blank or feedback
-                  if (!showFeedback) {
-                    // Show blank gap
+                  if (showFeedback && isCorrect) {
+                    // Correct answer: green text in the gap
                     return (
-                      <span key={idx} className="inline-block min-w-[100px] border-b-2 border-cyan-500/50 mx-1 pb-1">
-                        _____
+                      <span key={idx} className="relative inline-block mx-1">
+                        <motion.span
+                          initial={{ opacity: 0, scale: 0.9 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          className="text-green-400 font-semibold"
+                        >
+                          {displayWord.portuguese}
+                        </motion.span>
+                      </span>
+                    );
+                  } else if (showGhost) {
+                    // Wrong answer: ghost fading in the gap (non-blocking)
+                    return (
+                      <span key={idx} className="relative inline-block mx-1">
+                        <motion.span
+                          key={ghostKey}
+                          initial={{ opacity: 0.5 }}
+                          animate={{ opacity: 0 }}
+                          transition={{ duration: 3, ease: 'easeOut' }}
+                          className="text-red-400 font-semibold"
+                        >
+                          {displayWord.portuguese}
+                        </motion.span>
                       </span>
                     );
                   } else {
-                    // Show feedback inline
+                    // Blank gap
                     return (
-                      <span key={idx} className="relative inline-block mx-1">
-                        {/* Correct - green text */}
-                        {isCorrect && (
-                          <motion.span
-                            initial={{ opacity: 0, scale: 0.9 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            className="text-green-400 font-semibold"
-                          >
-                            {currentWord.portuguese}
-                          </motion.span>
-                        )}
-
-                        {/* Incorrect - red/orange ghost that fades to invisible, then blank reappears */}
-                        {!isCorrect && (
-                          <motion.span
-                            initial={{ opacity: 0.5 }}
-                            animate={{ opacity: 0 }}
-                            transition={{ duration: 3, ease: 'easeOut' }}
-                            className="text-red-400 font-semibold"
-                          >
-                            {currentWord.portuguese}
-                          </motion.span>
-                        )}
+                      <span key={idx} className="inline-block min-w-[100px] border-b-2 border-cyan-500/50 mx-1 pb-1">
+                        {'\u00A0'}
                       </span>
                     );
                   }
@@ -317,7 +379,7 @@ export function DrillCard() {
           {/* English Translation - Always Visible */}
           <div className="text-center space-y-2">
             <p className="text-lg md:text-xl text-gray-300 font-medium">
-              {currentWord.english}
+              {displayEnglishSentence || displayWord.english}
             </p>
             <p className="text-xs text-gray-500">
               {wordStats}
@@ -339,7 +401,7 @@ export function DrillCard() {
               className={`w-full rounded-lg border-2 px-4 md:px-6 py-3 md:py-4 text-lg md:text-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 transition-colors ${
                 showFeedback && isCorrect
                   ? 'border-green-500 bg-green-900/30 focus:border-green-500 focus:ring-green-500/20'
-                  : showFeedback && !isCorrect
+                  : showGhost
                   ? 'border-red-500 bg-red-900/20 focus:border-red-500 focus:ring-red-500/20'
                   : 'border-gray-700 bg-gray-800 focus:border-cyan-500 focus:ring-cyan-500/20'
               }`}
@@ -353,12 +415,12 @@ export function DrillCard() {
               animate={{
                 backgroundColor: showFeedback && isCorrect
                   ? 'rgba(34, 197, 94, 0.2)'
-                  : showFeedback && !isCorrect
+                  : showGhost
                   ? 'rgba(239, 68, 68, 0.15)'
                   : 'rgba(31, 41, 55, 1)',
                 borderColor: showFeedback && isCorrect
                   ? 'rgb(34, 197, 94)'
-                  : showFeedback && !isCorrect
+                  : showGhost
                   ? 'rgb(239, 68, 68)'
                   : 'rgb(55, 65, 81)',
               }}
@@ -366,7 +428,7 @@ export function DrillCard() {
             />
 
             {/* Near-match feedback */}
-            {showFeedback && nearMatch && !isCorrect && (
+            {showGhost && nearMatch && (
               <motion.div
                 initial={{ opacity: 0, y: -10 }}
                 animate={{ opacity: 1, y: 0 }}

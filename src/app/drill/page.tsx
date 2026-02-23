@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/Button';
 
 export default function DrillPage() {
   const router = useRouter();
-  const { currentSession, sessionWords, appState } = useVocabStore();
+  const { currentSession, sessionMasteredIds, appState, clearSession } = useVocabStore();
 
   // Redirect to dashboard if no active session
   useEffect(() => {
@@ -47,9 +47,21 @@ export default function DrillPage() {
         incorrectAnswers={incorrectAnswers}
         nearMatches={nearMatches}
         dailyStreak={appState.dailyStreak}
+        wordsMastered={sessionMasteredIds.length}
+        onNavigateAway={clearSession}
       />
     );
   }
 
-  return <DrillCard />;
+  return (
+    <div className="relative">
+      <button
+        onClick={() => { clearSession(); router.push('/'); }}
+        className="fixed left-4 bottom-4 z-50 text-sm text-gray-500 hover:text-gray-300 transition-colors"
+      >
+        ← Back to dashboard
+      </button>
+      <DrillCard />
+    </div>
+  );
 }

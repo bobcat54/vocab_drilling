@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from 'next';
-import { ThemeToggle } from '@/components/ThemeToggle';
-import Link from 'next/link';
+import { AuthGuard } from '@/components/AuthGuard';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -29,7 +28,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning className="dark">
       <body className="min-h-screen bg-gray-900">
-        {children}
+        <AuthGuard>{children}</AuthGuard>
       </body>
     </html>
   );

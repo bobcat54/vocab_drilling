@@ -211,7 +211,11 @@ export function assignWordsToGroups(
   // Assign to groups
   groups.forEach(group => {
     const themeWords = themeMap.get(group.theme) || [];
-    const groupIndex = parseInt(group.name.split(' ').pop() || '1') - 1;
+    const lastToken = group.name.split(' ').pop() || '';
+    const parsed = parseInt(lastToken);
+    // For single-group themes the name has no numeric suffix (e.g. "Food & Cooking"),
+    // so parseInt returns NaN. Default to index 0 in that case.
+    const groupIndex = isNaN(parsed) ? 0 : parsed - 1;
     const start = groupIndex * WORDS_PER_GROUP;
     const end = start + WORDS_PER_GROUP;
     const words = themeWords.slice(start, end);

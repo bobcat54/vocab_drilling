@@ -7,23 +7,27 @@ export interface Word {
   portuguese: string;
   english: string;
   groupId: string;
-  exampleSentences: string[]; // API-generated example sentences
+  exampleSentences: { id: string; pt: string; en: string }[]; // API-generated example sentences with translations
 
-  // SM-2 spaced repetition fields
-  easinessFactor: number; // 1.3-2.5, default 2.5
-  interval: number; // Days until next review
-  repetitions: number; // Consecutive correct answers
-  nextReviewDate: string; // ISO date string
+  // Level-based spaced repetition fields
+  level: number; // 0-8
+  lastReviewDate: string | null; // ISO date string
+  nextReviewDate: string; // ISO date string, recalculated from level
 
   // Statistics
-  timesSeen: number;
-  timesCorrect: number;
-  lastReviewed: string | null; // ISO date string
+  totalAttempts: number;
+  totalCorrect: number;
+  totalWrong: number;
   createdAt: string; // ISO date string
 
   // Lingvist features
   isMuted: boolean; // User has marked this word as "skip"
   status: WordStatus; // new, learning, or learned
+}
+
+export interface QueueEntry {
+  wordId: string;
+  sessionCorrectStreak: number;
 }
 
 export interface WordGroup {
@@ -69,16 +73,71 @@ export interface AppState {
   sessionGoal: number; // Default 50 cards per session
 }
 
-// SM-2 algorithm types
-export interface SM2Result {
-  easinessFactor: number;
-  interval: number;
-  repetitions: number;
-  nextReviewDate: Date;
-}
-
 // CSV import types
 export interface CSVRow {
   portuguese: string;
   english: string;
+}
+
+// Supabase row types
+export interface DbWord {
+  id: string;
+  portuguese: string;
+  english: string;
+  group_id: string;
+  created_at: string;
+}
+
+export interface DbSentence {
+  id: string;
+  target_word_id: string;
+  sentence_pt: string;
+  sentence_en: string;
+}
+
+export interface DbUserProgress {
+  id?: string;
+  item_type: string;
+  item_id: string;
+  level: number;
+  next_review_date: string;
+  last_review_date: string | null;
+  total_attempts: number;
+  total_correct: number;
+  total_wrong: number;
+  is_muted: boolean;
+  has_been_mastered: boolean;
+}
+
+export interface DbGroup {
+  id: string;
+  name: string;
+  theme: string;
+  is_unlocked: boolean;
+  completed_sessions: number;
+  accuracy: number;
+  created_at: string;
+}
+
+export interface DbDrillSession {
+  id: string;
+  group_id: string;
+  started_at: string;
+  completed_at: string | null;
+  accuracy: number;
+  total_answers: number;
+  correct_answers: number;
+}
+
+export interface DbErrorLog {
+  id?: string;
+  drill_type: string;
+  sentence_id: string | null;
+  word_id: string;
+  expected_answer: string;
+  user_input: string;
+  is_correct: boolean;
+  time_to_answer_ms: number;
+  fuzzy_score: number;
+  error_category: string | null;
 }
